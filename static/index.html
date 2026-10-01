@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Voice Agent</title>
+  <style>
+    :root { color-scheme: dark; font-family: Georgia, serif; }
+    body { margin: 0; background: #12151c; color: #e8e4dc; }
+    main { max-width: 720px; margin: 0 auto; padding: 48px 20px; }
+    h1 { font-weight: 500; letter-spacing: -0.03em; }
+    p.lead { color: #b7b1a6; }
+    button { font: inherit; background: #efe7d6; color: #1b1a17; border: 0; border-radius: 999px; padding: 12px 22px; cursor: pointer; }
+    button.stop { background: #c4554a; color: white; }
+    #log { margin-top: 28px; display: grid; gap: 12px; }
+    .bubble { padding: 12px 14px; border-radius: 12px; background: #1c212b; }
+    .bubble.user { background: #243044; }
+    .status { color: #9aa3b2; font-family: ui-sans-serif, system-ui, sans-serif; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Voice Agent</h1>
+    <p class="lead">Hold the button, speak, release. If the agent is talking, press Stop to barge in.</p>
+    <button id="talk">Hold to talk</button>
+    <button id="stop" class="stop" hidden>Stop</button>
+    <p id="status" class="status">Idle</p>
+    <div id="log"></div>
+  </main>
+  <script>
+    const talk = document.querySelector("#talk");
+    const stop = document.querySelector("#stop");
+    const statusEl = document.querySelector("#status");
+    const log = document.querySelector("#log");
+    const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
+    let recorder, chunks = [], player;
+
+    function add(role, text) {
+      const div = document.createElement("div");
+      div.className = "bubble " + role;
+      div.textContent = (role === "user" ? "You: " : "Agent: ") + text;
+      log.prepend(div);
+    }
+
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      if (msg.type === "cancelled") {
+        statusEl.textContent = "Interrupted";
+        stop.hidden = true;
+        return;
+      }
+      if (msg.type !== "turn") return;
+      if (msg.transcript) add("user", msg.transcript);
+      if (msg.reply) add("agent", msg.reply);
+      if (msg.audio_b64 && msg.audio_mime.startsWith("audio/")) {
+        const bytes = Uint8Array.from(atob(msg.audio_b64), (c) => c.charCodeAt(0));
+        const url = URL.createObjectURL(new Blob([bytes], { type: msg.audio_mime }));
+        player = new Audio(url);
+        stop.hidden = false;
+        statusEl.textContent = "Speaking";
+        player.onended = () => { stop.hidden = true; statusEl.textContent = "Idle"; };
+        player.play();
+      } else {
+        statusEl.textContent = "Idle";
+      }
+    };
+
+    stop.onclick = () => {
+      if (player) { player.pause(); player = null; }
+      ws.send(JSON.stringify({ type: "cancel" }));
+      stop.hidden = true;
+      statusEl.textContent = "Interrupted";
+    };
+
+    async function start() {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      chunks = [];
+      recorder = new MediaRecorder(stream);
+      recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+      recorder.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+        const buffer = await blob.arrayBuffer();
+        const bytes = new Uint8Array(buffer);
+        let binary = "";
+        for (const b of bytes) binary += String.fromCharCode(b);
+        statusEl.textContent = "Thinking";
+        ws.send(JSON.stringify({
+          type: "audio",
+          mime: blob.type || "audio/webm",
+          data: btoa(binary),
+        }));
+      };
+      recorder.start();
+      statusEl.textContent = "Listening";
+    }
+
+    talk.onpointerdown = (e) => { e.preventDefault(); start(); };
+    talk.onpointerup = () => { if (recorder && recorder.state === "recording") recorder.stop(); };
+    talk.onpointerleave = () => { if (recorder && recorder.state === "recording") recorder.stop(); };
+  </script>
+</body>
+</html>
